@@ -23,7 +23,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $runDir 'findings') | Out-N
 - `safe_id`：用户 id；取不到时用会话 id；两者都取不到时用 `local`。先转成安全文件名片段（小写、非字母数字换成 `-`）。
 - `run_id`：`YYYYMMDD-HHMMSS`。
 - 目录下固定三类文件：
-  - `tasks.json`：本次任务清单；先写入清洗后的原始搜索词数组，再作为唯一参数交给 Python 脚本一次性补齐全部 GBK 搜索 URL；
+  - `tasks.json`：本次任务清单，保存清洗后的原始搜索词字符串数组，供搜索阶段直接作为 `opencli 1688 search` 的查询参数使用；
   - `findings/group-{NN}.json`：每组搜索与判定结果，做完一组写一个，**中断后可据此续跑**；
   - `sourcing-1688_{source_slug}_{YYYYMMDD}_{safe_id}.md`：最终报告。
 - 不要直接写入 `%TEMP%` 根目录、skill 目录、代码仓库根目录或其他共享固定路径；不要覆盖用户提供的原始报告。所有路径拼接使用 Windows 文件 API 或 `Join-Path`，不要手工拼接类 Unix 路径。
@@ -42,7 +42,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $runDir 'findings') | Out-N
 | `real_need` | `**用户真实需求：**` 段正文 | 原文保留，不改写 |
 | `must_have` | `**不可妥协需求：**` 段的列表项 | 逐条保留，这是硬门槛 |
 | `nice_to_have` | `**可妥协需求：**` 段的列表项 | 用于差异化，不做门槛 |
-| `search_terms` | `**1688中文关键词：**` 段 | 见第 3 节；初次写入字符串数组，随后由脚本批量转换为 `{term, search_url}` 对象 |
+| `search_terms` | `**1688中文关键词：**` 段 | 见第 3 节，最终为四个桶的字符串数组 |
 | `risk_note` | `**主要风险：**` 段正文 | 写进报告的风险提示 |
 
 缺 `**用户真实需求：**` 或 `**不可妥协需求：**` 的组：仍然处理，但在 `tasks.json` 标记 `weak_criteria: true`，报告里注明「该组判定基准不完整，候选仅作方向参考」。
@@ -66,30 +66,16 @@ New-Item -ItemType Directory -Force -Path (Join-Path $runDir 'findings') | Out-N
 2. 去掉行尾的注释括号，全角 `（...）` 和半角 `(...)` 都算，例如 `关键词 1（最精准：品类 + 适配对象/规格）` → `关键词 1`；
 3. 去掉 `——`、`—`、`--` 之后的解释尾巴（`替代品类可搜` 常见），例如 `电动剃须刀收纳架 —— 可替代原因…` → `电动剃须刀收纳架`；
 4. 去掉包裹的反引号、中英文引号；
-5. 压缩多余空白，但**保留词内空格**——`飞利浦剃须刀充电底座 兼容S9000` 里的空格是 1688 的多词限定，不能删；
+5. 压缩多余空白，但**保留词内空格**——`飞利浦剃须刀充电底座 兼容S9000` 里的空格是有意义的多词限定，不能删；
 6. 丢弃模板占位符和无效值：`关键词 1`~`关键词 8`、`未找到`、`未联网核实，需手动处理`、空行。
 
 组内去重。全部桶都为空时，该组 `status: skipped_no_terms`，报告里注明「报告未提供 1688 关键词，已跳过」，**不要自造搜索词**。
 
-**跨组去重**：同一个搜索词在多个组出现时只搜一次，结果缓存复用。Python 脚本在一次进程内只生成一次该词的 URL，再把相同的 `{term, search_url}` 写回每个相关组；商品仍必须**分别**按每组自己的 `must_have` 判定——同一批结果对 A 组合格不代表对 B 组合格。
+**跨组去重**：同一个搜索词在多个组出现时只搜一次，结果缓存复用；商品仍必须**分别**按每组自己的 `must_have` 判定——同一批结果对 A 组合格不代表对 B 组合格。
 
-### 3.1 预生成 GBK 搜索 URL
+**不再做 URL 编码或预处理**。这些搜索词就是最终要传给 `opencli 1688 search "<term>"` 的查询字符串，不需要百分号编码、GBK 转换或拼接 `s.1688.com` 之类的搜索 URL——这些工作由 opencli 的 1688 适配器内部完成，Agent 不参与也不复现这一步。
 
-完成清洗和去重后执行：
-
-1. 先按第 5 节结构把四个桶写成原始字符串数组，生成 UTF-8 `tasks.json`；此时不要写 `search_url_encoding`；
-2. 从 skill 根目录解析 `scripts/new_1688_search_url.py`，以 `tasks.json` 绝对路径作为唯一参数，整个运行只调用一次：
-
-   ```powershell
-   $encoder = Join-Path $skillRoot 'scripts\new_1688_search_url.py'
-   python $encoder $tasksPath
-   if ($LASTEXITCODE -ne 0) { throw '1688 搜索 URL 批量预处理失败。' }
-   ```
-
-3. 脚本在内存中遍历所有组的 `primary`、`secondary`、`alternative`、`oem`，把每个字符串替换为 `{term, search_url}`，设置顶层 `search_url_encoding: "gbk-percent"`，全部成功后原子替换原文件；
-4. 脚本退出码为 0 后重新读取 `tasks.json`，确认所有桶均为对象数组、每项的 `term` 与 `search_url` 非空、URL 前缀正确且不含空白字符，然后才进入浏览器阶段。
-
-任一搜索词编码失败、输入结构不符、脚本退出码非 0 或复读校验失败时，立即停止并报告脚本错误；脚本不得部分更新文件，Agent 不得逐词重复调用脚本、改用 UTF-8 或手工拼接 URL。
+`search_terms` 全量确定并写入 `tasks.json` 后视为冻结：搜索阶段不得追加新词；单个词过窄时只能改用同组已有的下一项，没有备用项就如实结束该词。
 
 ## 4. 本次搜索范围
 
@@ -105,19 +91,18 @@ New-Item -ItemType Directory -Force -Path (Join-Path $runDir 'findings') | Out-N
 
 其他默认值：
 
-- 每个搜索词抓取条数：40；页面实际可核实结果不足 40 条时按实际数量记录，不用无关商品补足；
+- 每个搜索词的 `opencli 1688 search --limit`：40；1688 搜索单次最多返回 100 条，页面实际可核实结果不足 40 条时按实际数量记录，不用无关商品补足；
 - 单次运行最多处理 40 组，超出按报告出现顺序截取，并在总览写明截取；
-- 搜索**串行**执行，不并发，避免触发 1688 风控。
+- 搜索**串行**执行，不并发调用 opencli，避免触发 1688 风控或占满 Browser Bridge 控制的单个 Chrome 会话。
 
-## 5. 写入并批量预处理 tasks.json
+## 5. 写入 tasks.json
 
-首次写入时，四个桶使用清洗后的字符串数组，例如 `"primary": ["飞利浦剃须刀充电底座 适配S9000"]`。调用一次脚本后，同一个文件必须变为以下最终结构：
+四个桶直接使用清洗后的字符串数组，例如 `"primary": ["飞利浦剃须刀充电底座 适配S9000"]`。最终结构：
 
 ```json
 {
   "source_file": "<用户上传 .md 的绝对路径>",
   "run_id": "20260811-142530",
-  "search_url_encoding": "gbk-percent",
   "total_groups": 28,
   "planned_groups": 28,
   "truncated": false,
@@ -131,12 +116,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $runDir 'findings') | Out-N
       "must_have": ["…", "…"],
       "nice_to_have": ["…"],
       "search_terms": {
-        "primary": [
-          {
-            "term": "飞利浦剃须刀充电底座 适配S9000",
-            "search_url": "https://s.1688.com/selloffer/offer_search.htm?keywords=%B7%C9%C0%FB%C6%D6%CC%EA%D0%EB%B5%B6%B3%E4%B5%E7%B5%D7%D7%F9%20%CA%CA%C5%E4S9000"
-          }
-        ],
+        "primary": ["飞利浦剃须刀充电底座 适配S9000"],
         "secondary": [],
         "alternative": [],
         "oem": []
@@ -149,11 +129,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $runDir 'findings') | Out-N
 }
 ```
 
-`search_url_encoding` 固定为 `gbk-percent`。四个 `search_terms` 桶中的每一项都必须同时包含非空 `term` 和 `search_url`；不再允许字符串数组或只有关键词没有 URL 的对象。浏览器阶段不得补全缺失 URL。
-
-脚本成功后冻结 `search_terms`。搜索阶段不得追加新词或再次调用脚本；单个词过窄时只能改用同组已有的下一项，没有已预处理备用项就如实结束该词。
-
-`status` 取值：`pending` / `done` / `skipped_no_terms` / `paused_risk_control`（等待用户手工处理风控，恢复后改回 `pending`）/ `truncated`。不得把 `paused_risk_control` 当成已跳过或已完成。
+`status` 取值：`pending` / `done` / `skipped_no_terms` / `paused_risk_control`（等待用户手工处理登录、验证或 Browser Bridge 连接问题，恢复后改回 `pending`）/ `truncated`。不得把 `paused_risk_control` 当成已跳过或已完成。
 
 ## 6. 解析后向用户简述
 
