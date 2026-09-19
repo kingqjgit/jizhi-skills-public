@@ -4,7 +4,7 @@
 
 ## 1. 文件
 
-- 路径：本次运行目录下的 `sourcing-1688_{source_slug}_{YYYYMMDD}_{safe_id}.md`。
+- 路径：当前工作目录下的 `sourcing-1688_{source_slug}_{run_id}.md`（`run_id` 见 `input-parsing.md` 第 1 节）。
 - `source_slug`：用户上传报告文件名里的方向部分，转成小写安全片段。
 - UTF-8 Markdown，只生成一个 `.md`，不转 PDF，不把正文粘进聊天。
 

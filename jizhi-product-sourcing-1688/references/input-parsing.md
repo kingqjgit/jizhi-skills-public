@@ -2,31 +2,19 @@
 
 在搜索开始前执行。目标是把用户上传的 `.md` 变成一份结构化的采购任务清单，之后所有搜索和判定都只看这份清单。
 
-## 1. 建立本次运行目录
+## 1. 使用当前工作目录
 
-在 Windows 临时目录下建立本次运行目录：
+不再由 Agent 另建 `%TEMP%` 下的运行目录：假设用户已经为本次任务准备好了工作目录，本次运行的所有产出文件直接写入**当前会话的工作目录**（Agent 当前所在的工作目录；用户在消息里明确指定了其他目录时以用户指定的为准）。
 
-```text
-%TEMP%\jizhi-product-sourcing-1688_{safe_id}\{run_id}\
-```
+1. 确认当前工作目录存在且可写。目录不存在、不可写，或明显不是本次任务该用的目录（例如仍是 skill 自身所在目录）时，停下来向用户确认应该用哪个目录，不要擅自改用 `%TEMP%` 或其他未确认路径代替。
+2. 在该工作目录下建立/使用固定三类文件（相对路径均相对当前工作目录）：
+   - `findings/group-{NN}.json`：每组搜索与判定结果，做完一组写一个，**中断后可据此续跑**；
+   - `tasks.json`：本次任务清单，保存清洗后的原始搜索词字符串数组，供搜索阶段直接作为 `opencli 1688 search` 的查询参数使用；
+   - `sourcing-1688_{source_slug}_{run_id}.md`：最终报告，`run_id` 见下方定义，避免同一目录下多次运行互相覆盖。
+3. 需要 PowerShell 时用 `New-Item -ItemType Directory -Force -Path findings` 之类的相对路径操作，不要用 `Get-Location` 之外的路径拼接把文件写到工作目录以外；需要绝对路径时用 `Resolve-Path -LiteralPath .` 取得当前工作目录后再 `Join-Path`。
 
-需要 PowerShell 时使用以下等价方式；如果 Agent 有原生文件 API，可直接按同样的路径规则创建：
-
-```powershell
-# 先按下方规则得到 $safeId
-$runId = Get-Date -Format 'yyyyMMdd-HHmmss'
-$runRoot = Join-Path ([System.IO.Path]::GetTempPath()) "jizhi-product-sourcing-1688_$safeId"
-$runDir = Join-Path $runRoot $runId
-New-Item -ItemType Directory -Force -Path (Join-Path $runDir 'findings') | Out-Null
-```
-
-- `safe_id`：用户 id；取不到时用会话 id；两者都取不到时用 `local`。先转成安全文件名片段（小写、非字母数字换成 `-`）。
-- `run_id`：`YYYYMMDD-HHMMSS`。
-- 目录下固定三类文件：
-  - `tasks.json`：本次任务清单，保存清洗后的原始搜索词字符串数组，供搜索阶段直接作为 `opencli 1688 search` 的查询参数使用；
-  - `findings/group-{NN}.json`：每组搜索与判定结果，做完一组写一个，**中断后可据此续跑**；
-  - `sourcing-1688_{source_slug}_{YYYYMMDD}_{safe_id}.md`：最终报告。
-- 不要直接写入 `%TEMP%` 根目录、skill 目录、代码仓库根目录或其他共享固定路径；不要覆盖用户提供的原始报告。所有路径拼接使用 Windows 文件 API 或 `Join-Path`，不要手工拼接类 Unix 路径。
+- `run_id`：`YYYYMMDD-HHMMSS`，记录在 `tasks.json` 里，也用于报告文件名，避免同一天在同一工作目录下重复运行时覆盖旧文件。
+- 不要把这些文件写到当前工作目录以外的路径（`%TEMP%`、skill 自身目录、用户未确认的其他目录等），也不要覆盖用户提供的原始报告文件。
 
 ## 2. 切分关键词组
 
